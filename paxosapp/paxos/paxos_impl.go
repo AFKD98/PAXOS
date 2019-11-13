@@ -17,6 +17,7 @@ type paxosNode struct {
 	// TODO: implement this!
 	myId          int
 	myPort        int
+	numNodes      int
 	listener      net.Listener
 	incommingChan chan net.Conn
 	ring          map[int]nodeInternal
@@ -26,7 +27,7 @@ type paxosNode struct {
 type nodeInternal struct {
 	// internal struct for other nodes
 	ID   int
-	conn net.Conn
+	conn *rpc.Client
 }
 
 // Desc:
@@ -47,6 +48,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	node := new(paxosNode)
 	node.incommingChan = make(chan net.Conn)
 	node.myId = srvId
+	node.numNodes = numNodes
 	// fmt.Println(hostMap)
 	intPort, _ := strconv.Atoi(myHostPort)
 	node.myPort = intPort
@@ -72,16 +74,18 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 		success := false
 		port := hostMap[i]
 		fmt.Println(port)
-		_, err := rpc.DialHTTP("tcp", port)
+		client, err := rpc.DialHTTP("tcp", port)
 
 		if err != nil {
 			fmt.Println(err)
 			fmt.Println("ServerID:", srvId, "failed to dail port:", port)
 			for j := 0; j < numRetries-1; j++ {
 				time.Sleep(1000 * time.Millisecond)
-				_, err := rpc.DialHTTP("tcp", port)
+				client, err := rpc.DialHTTP("tcp", port)
 				if err == nil {
 					success = true
+					node.ring[i] = nodeInternal{i, client}
+					fmt.Println("ServerID:", srvId, "connected to port", port)
 					break // we have connected
 				} else {
 					fmt.Println(err)
@@ -91,14 +95,11 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 				reply := "ServerID: " + string(srvId) + " num retries Failed with port:" + port
 				return nil, errors.New(reply)
 			}
-
-			// append to our ring
-
-			// node.ring[i] = nodeInternal{i, conn}
 		} else {
+			// append to our ring
+			node.ring[i] = nodeInternal{i, client}
 			fmt.Println("ServerID:", srvId, "connected to port", port)
 		}
-
 	}
 
 	fmt.Println("ServerID:", srvId, "Connected to all nodes")
@@ -133,15 +134,17 @@ func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, re
 		fmt.Println("ServerID:", pn.myId, "GetNextProposalNumber found:", pn.database[i].N, "sending:", pn.database[i].N+1)
 		pn.database[i] = paxosrpc.ProposeArgs{N: pn.database[i].N + 1, Key: pn.database[i].Key, V: pn.database[i].V}
 		theProposalNum = pn.database[i].N
+		toReturn := paxosrpc.ProposalNumberReply{N: theProposalNum}
+		*reply = toReturn
 	} else {
 		// this is a new key, so make an entry
 		theProposalNum = 101 // just to check
 		fmt.Println("ServerID:", pn.myId, "GetNextProposalNumber not found, sending:", theProposalNum)
 		newEntry := paxosrpc.ProposeArgs{N: theProposalNum, Key: theKey, V: nil}
 		pn.database[len(pn.database)] = newEntry
+		toReturn := paxosrpc.ProposalNumberReply{N: theProposalNum}
+		*reply = toReturn
 	}
-	toReturn := paxosrpc.ProposalNumberReply{N: theProposalNum}
-	*reply = toReturn
 	return nil
 }
 
@@ -154,6 +157,25 @@ func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, re
 // args: the key, value pair to propose together with the proposal number returned by GetNextProposalNumber
 // reply: value that was actually committed for the given key
 func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.ProposeReply) error {
+	theKey := args.Key
+	theN := args.N
+	theValue := args.V
+
+	fmt.Println("ServerID:", pn.myId, "Proposal key:", theKey, "(N)", theN, "value:", theValue)
+	// PHASE 1, Broadcast
+
+	// make the prepare request
+	prepareReq := paxosrpc.PrepareArgs{Key: theKey, N: theN, RequesterId: pn.myId}
+	prepareResponse := make(map[int]paxosrpc.PrepareReply) // map to get the replies
+
+	// send rpc calls to all nodes
+	for i := 0; i < pn.numNodes; i++ {
+		reply := prepareResponse[i]
+		pn.ring[i].conn.Call("RecvPrepare", prepareReq, &reply)
+	}
+
+	//check replies
+	// ------------------------- NEED TO WORK ON THIS --------------------------------
 	return errors.New("not implemented")
 }
 
@@ -165,7 +187,30 @@ func (pn *paxosNode) Propose(args *paxosrpc.ProposeArgs, reply *paxosrpc.Propose
 // args: the key to check
 // reply: the value and status for this lookup of the given key
 func (pn *paxosNode) GetValue(args *paxosrpc.GetValueArgs, reply *paxosrpc.GetValueReply) error {
-	return errors.New("not implemented")
+	// look for key in database
+	theKey := args.Key
+	fmt.Println("ServerID:", pn.myId, "GetValue called for key:", theKey)
+	i := 0
+	found := false
+	for i = 0; i < len(pn.database); i++ {
+		if pn.database[i].Key == theKey {
+			found = true
+			break
+		}
+	}
+	if found == true {
+		// return answer
+		fmt.Println("ServerID:", pn.myId, "GetValue found:", pn.database[i].V, "for key:", theKey)
+		toReturn := paxosrpc.GetValueReply{V: pn.database[i].V, Status: paxosrpc.KeyFound}
+		*reply = toReturn
+	} else {
+		// not found
+		fmt.Println("ServerID:", pn.myId, "GetValue not found for key:", theKey)
+		toReturn := paxosrpc.GetValueReply{V: nil, Status: paxosrpc.KeyNotFound}
+		*reply = toReturn
+
+	}
+	return nil
 }
 
 // Desc:
