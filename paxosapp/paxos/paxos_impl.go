@@ -20,6 +20,7 @@ type paxosNode struct {
 	listener      net.Listener
 	incommingChan chan net.Conn
 	ring          map[int]nodeInternal
+	database      map[int]paxosrpc.ProposeArgs
 }
 
 type nodeInternal struct {
@@ -46,14 +47,14 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 	node := new(paxosNode)
 	node.incommingChan = make(chan net.Conn)
 	node.myId = srvId
-	fmt.Println(hostMap)
+	// fmt.Println(hostMap)
 	intPort, _ := strconv.Atoi(myHostPort)
 	node.myPort = intPort
 	// strPort := ":" + myHostPort
-	fmt.Println("listening on: ", myHostPort)
+	fmt.Println("ServerID:", srvId, "Listening on:", myHostPort)
 	ln, err := net.Listen("tcp", myHostPort)
 	if err != nil {
-		fmt.Println("Error in listening on port: ", myHostPort)
+		fmt.Println("Error in listening on port:", myHostPort)
 	}
 
 	// listen on port
@@ -75,7 +76,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 
 		if err != nil {
 			fmt.Println(err)
-			fmt.Printf(myHostPort+" Dial failed on port: %s\n", port)
+			fmt.Println("ServerID:", srvId, "failed to dail port:", port)
 			for j := 0; j < numRetries-1; j++ {
 				time.Sleep(1000 * time.Millisecond)
 				_, err := rpc.DialHTTP("tcp", port)
@@ -87,7 +88,7 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 				}
 			}
 			if success == false { // failed to connect to a node
-				reply := myHostPort + " failed to connect to node with port:" + port
+				reply := "ServerID: " + string(srvId) + " num retries Failed with port:" + port
 				return nil, errors.New(reply)
 			}
 
@@ -95,12 +96,12 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 
 			// node.ring[i] = nodeInternal{i, conn}
 		} else {
-			fmt.Println("connected to port", port)
+			fmt.Println("ServerID:", srvId, "connected to port", port)
 		}
 
 	}
 
-	fmt.Println("Connected to all nodes")
+	fmt.Println("ServerID:", srvId, "Connected to all nodes")
 	return node, err
 
 	//return nil, errors.New("not implemented")
@@ -115,7 +116,33 @@ func NewPaxosNode(myHostPort string, hostMap map[int]string, numNodes, srvId, nu
 // args: the key to propose
 // reply: the next proposal number for the given key
 func (pn *paxosNode) GetNextProposalNumber(args *paxosrpc.ProposalNumberArgs, reply *paxosrpc.ProposalNumberReply) error {
-	return errors.New("not implemented")
+	theKey := args.Key
+	fmt.Println("ServerID:", pn.myId, "GetNextProposalNumber called for key:", theKey)
+	theProposalNum := -1
+	i := 0
+	found := false
+	// find last proposed value
+	for i = 0; i < len(pn.database); i++ {
+		if pn.database[i].Key == theKey {
+			found = true
+			break
+		}
+	}
+	if found == true {
+		// increament last proposal number and send it
+		fmt.Println("ServerID:", pn.myId, "GetNextProposalNumber found:", pn.database[i].N, "sending:", pn.database[i].N+1)
+		pn.database[i] = paxosrpc.ProposeArgs{N: pn.database[i].N + 1, Key: pn.database[i].Key, V: pn.database[i].V}
+		theProposalNum = pn.database[i].N
+	} else {
+		// this is a new key, so make an entry
+		theProposalNum = 101 // just to check
+		fmt.Println("ServerID:", pn.myId, "GetNextProposalNumber not found, sending:", theProposalNum)
+		newEntry := paxosrpc.ProposeArgs{N: theProposalNum, Key: theKey, V: nil}
+		pn.database[len(pn.database)] = newEntry
+	}
+	toReturn := paxosrpc.ProposalNumberReply{N: theProposalNum}
+	*reply = toReturn
+	return nil
 }
 
 // Desc:
@@ -202,26 +229,4 @@ func (pn *paxosNode) RecvReplaceServer(args *paxosrpc.ReplaceServerArgs, reply *
 // reply: a byte array containing necessary data used by replacement server to recover
 func (pn *paxosNode) RecvReplaceCatchup(args *paxosrpc.ReplaceCatchupArgs, reply *paxosrpc.ReplaceCatchupReply) error {
 	return errors.New("not implemented")
-}
-
-func acceptor(node *paxosNode) {
-	fmt.Println(node.myId, " listening...")
-	for {
-		conn, err := node.listener.Accept()
-		if err != nil {
-			return
-		}
-		fmt.Println("Incomming connection...")
-		node.incommingChan <- conn
-	}
-}
-
-func incomming(node *paxosNode) {
-	for {
-		select {
-		case newConn := <-node.incommingChan:
-			fmt.Println(newConn, " connected")
-			//deal with new node
-		}
-	}
 }
